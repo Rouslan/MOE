@@ -1,10 +1,16 @@
 * Features
 
+  * The function multistart_expected_improvement_optimization in moe.optimal_learning.python.cpp_wrappers.expected_improvement
+    now has the option of using GPU optimizer. (#368)
+  * Implemented  BLA (Bayesian Learning Automaton). (#373)
   * Connected GPU functions to multistart gradient descent optimizer. (#270)
 
 * Changes
 
 * Bugs
+
+  * variance in a sample arm was dropped in _make_bandit_historical_info_from_params. (#385)
+  * SampleArm's __add__ and __str__ were broken. (#387)
 
 ## v0.2.0 (2014-08-15)
 
