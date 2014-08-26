@@ -40,14 +40,26 @@ def optimization_method(experiment, method_name, num_to_sample, num_threads, num
         cpp_gp = cppGaussianProcess(experiment._cpp_cov, experiment._historical_data)
         ei_evaluator = cppExpectedImprovement(gaussian_process=cpp_gp, num_mc_iterations=num_mc_itr)
         optimizer = cppGradientDescentOptimizer(experiment._cpp_search_domain, ei_evaluator, gd_opt_parameters, dum_search_itr)
-        if (method_name == "epi_gpu"):
-            return multistart_expected_improvement_optimization(optimizer, 0, num_to_sample, max_num_threads=num_threads)
+        if (method_name == "ei_gpu"):
+            return multistart_expected_improvement_optimization(optimizer, num_multistarts, num_to_sample, use_gpu=False, which_gpu=0, max_num_threads=num_threads)
         elif (method_name == "CL"):
             return constant_liar_expected_improvement_optimization(optimizer, 0, num_to_sample, lie_value, max_num_threads=num_threads)
         elif (method_name == "KB"):
             return kriging_believer_expected_improvement_optimization(optimizer, 0, num_to_sample, max_num_threads=num_threads)
         else:
             raise NotImplementedError("Not a valid optimization method")
+
+def get_optimizer(experiment, num_to_sample, num_mc_itr, dum_search_itr, gd_opt_parameters, BFGS_parameters):
+    python_gp = pythonGaussianProcess(experiment._python_cov, experiment._historical_data)
+    repeated_domain = RepeatedDomain(num_to_sample, experiment._python_search_domain)
+    python_ei_evaluator = pythonExpectedImprovement(gaussian_process=python_gp)
+    BFGS_optimizer = LBFGSBOptimizer(repeated_domain, python_ei_evaluator, BFGS_parameters)
+
+    cpp_gp = cppGaussianProcess(experiment._cpp_cov, experiment._historical_data)
+    cpp_ei_evaluator = cppExpectedImprovement(gaussian_process=cpp_gp, num_mc_iterations=num_mc_itr)
+    cpp_optimizer = cppGradientDescentOptimizer(experiment._cpp_search_domain, cpp_ei_evaluator, gd_opt_parameters, dum_search_itr)
+    return BFGS_optimizer, cpp_optimizer
+
 
 def get_parameters(num_multistarts, max_num_steps, max_num_restarts):
     newton_opt_parameters = cppNewtonParameters(num_multistarts=num_multistarts, max_num_steps=max_num_steps, gamma=1.01, time_factor=1.0e-3, max_relative_change=1.0, tolerance=1.0e-10)
@@ -133,12 +145,17 @@ class NumericalExperiment():
         best_ei_gpu = numpy.zeros(len(num_itr_table))
         best_ei_analytic = numpy.zeros(len(num_itr_table))
         self._reset_state()
+        gd_opt_parameters, BFGS_parameters, newton_opt_parameters =  get_parameters(num_multistarts, 100, max_num_restarts)
         self._update_hyperparameters(newton_opt_parameters, num_threads)
         for i, num_itr in enumerate(num_itr_table):
+            print i
             gd_opt_parameters, BFGS_parameters, newton_opt_parameters =  get_parameters(num_multistarts, num_itr, max_num_restarts)
-            analytic_points_to_sample = optimization_method(self, "exact_qEI", num_to_sample, num_threads, num_mc_itr, dum_search_itr, -1, gd_opt_parameters, BFGS_parameters, num_multistarts, which_gpu)
-            gpu_points_to_sample = optimization_method(self, "ei_gpu", num_to_sample, num_threads, num_mc_itr, dum_search_itr, -1, gd_opt_parameters, BFGS_parameters, num_multistarts, which_gpu)
+            BFGS_optimizer, cpp_optimizer = get_optimizer(self, num_to_sample, num_mc_itr, dum_search_itr, gd_opt_parameters, BFGS_parameters)
+            analytic_points_to_sample = python_multistart_expected_improvement_optimization(BFGS_optimizer, num_multistarts, num_to_sample)
+            print "gpu"
+            gpu_points_to_sample = multistart_expected_improvement_optimization(cpp_optimizer, num_multistarts, num_to_sample, use_gpu=True, which_gpu=0, max_num_threads=4)
             # evaluate ei
+            print "evaluate ei"
             cpp_gp = cppGaussianProcess(self._cpp_cov, self._historical_data)
             gpu_ei_evaluator = cppExpectedImprovement(cpp_gp, analytic_points_to_sample, num_mc_iterations=10000000)
             ei_and_time = gpu_ei_evaluator.time_expected_improvement(use_gpu=True, which_gpu=which_gpu, num_repeat=5)
@@ -180,18 +197,6 @@ class NumericalExperiment():
 
         return numpy.mean(gpu_time_table, axis=0), numpy.mean(analytic_time_table, axis=0), numpy.mean(ei_diff_table, axis=0)
 
-    def compare_best_ei_found(self, num_restart, num_steps, num_to_sample):
-        # for BFGS
-        approx_grad = True
-        max_func_evals = num_restart * num_steps
-        max_metric_correc = 10
-        factr = 10.0
-        pgtol = 1e-10
-        epsilon = 1e-8
-        BFGS_parameters = LBFGSBParameters(approx_grad, max_func_evals, max_metric_correc, factr, pgtol, epsilon)
-        python_gp = pythonGaussianProcess(self._python_cov, self._historical_data)
-        repeated_domain = RepeatedDomain(num_to_sample, self._python_search_search_domain)
-
 
 if __name__ == "__main__":
     import csv
@@ -202,6 +207,22 @@ if __name__ == "__main__":
     # with open('gpu_vs_analytic.csv','wb') as file:
     #     w = csv.writer(file)
     #     w.writerows([gpu_time, analytic_time, ei_diff])
-    pts = experiment._python_search_domain.generate_uniform_random_points_in_domain(4)
-    print pts
+    num_itr_table = [10, 50, 100]
+    num_to_sample = 4
+    which_gpu = 0
+    best_ei_gpu, best_ei_analytic = experiment.compare_best_ei(num_itr_table, num_to_sample, which_gpu)
+    print best_ei_gpu
+    print best_ei_analytic
 
+    #max_num_restarts = 1
+    #max_num_steps = 100
+    #num_threads = 1
+    #num_multistarts = 10
+    #dum_search_itr = 5000
+    #gd_opt_parameters, BFGS_parameters, newton_opt_parameters = get_parameters(num_multistarts, max_num_steps, max_num_restarts)
+    #cpp_gp = cppGaussianProcess(experiment._cpp_cov, experiment._historical_data)
+    #ei_evaluator = cppExpectedImprovement(gaussian_process=cpp_gp, num_mc_iterations=10000000)
+    #optimizer = cppGradientDescentOptimizer(experiment._cpp_search_domain, ei_evaluator, gd_opt_parameters, dum_search_itr)
+    #print "gpu start"
+    #pts = multistart_expected_improvement_optimization(optimizer, num_multistarts, num_to_sample, use_gpu=True, which_gpu=0, max_num_threads=num_threads)
+    #print pts
